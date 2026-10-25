@@ -39,7 +39,7 @@ The frontend was built using React, JavaScript, CSS and Vite.
 
 I focused on making CareNest easy to use, especially for older people who might not be very confident with technology.
 
-Features
+# Features
 
 A dashboard showing medications and their estimated remaining supply.
 
@@ -57,7 +57,7 @@ A chat interface where users can describe their medication in everyday language.
 
 The frontend currently uses localStorage to save information in the browser and mock responses for the AI chat while the backend integration is being developed.
 
-Setup (frontend)
+# Setup (frontend)
 
 Open a terminal in the project folder and run:
 
