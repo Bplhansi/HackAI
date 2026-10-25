@@ -33,7 +33,7 @@ python hello_nemotron.py # checks the connection to Nemotron
 - Hansika: AI
 - Aryaa: backend
 
-Frontend
+## Frontend
 
 The frontend was built using React, JavaScript, CSS and Vite.
 
