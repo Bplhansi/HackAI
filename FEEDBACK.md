@@ -22,3 +22,22 @@
 ## What could be better
 
 - _(fill in)_
+
+## Frontend Development Feedback
+
+### My role
+I worked on the frontend of CareNest AI using React, JavaScript and CSS. I focused on making the website simple and easy to use, especially for older people who might struggle with technology.
+
+### What worked well
+- We could work on different parts of the project at the same time, so I was able to build the website while my teammates worked on the AI and backend.
+- I liked how we could use AI to let users enter their medication information in normal sentences instead of having to fill out lots of forms.
+- It was useful being able to test the website with mock responses before connecting the actual AI.
+
+### What could be better
+- It would be helpful to have more beginner-friendly examples of how to connect Nebius Token Factory to a React website.
+- A simple tutorial showing how the frontend, backend and AI all connect together would have made things easier for us.
+
+### What I learned
+I learned that building an AI app isn't just about the AI itself. The website also needs to be easy to understand and use. Since CareNest is aimed at older people, I tried to focus on clear instructions, larger text and simple buttons.
+
+I also learned how to build and deploy a React website and how to prepare the frontend for connecting to an AI-powered backend.
