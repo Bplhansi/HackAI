@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-/* ---------------------------
-   LOCAL STORAGE
---------------------------- */
-
 const STORAGE = {
   medications: "carenest_medications",
   archive: "carenest_archive",
@@ -14,6 +10,16 @@ const STORAGE = {
   emergency: "carenest_emergency",
   name: "carenest_preferred_name",
 };
+
+const WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
 
 function localDate(date = new Date()) {
   return [
@@ -35,24 +41,13 @@ function addDays(value, days) {
 }
 
 function daysBetween(start, end) {
-  const a = Date.UTC(
-    start.getFullYear(),
-    start.getMonth(),
-    start.getDate()
-  );
-
-  const b = Date.UTC(
-    end.getFullYear(),
-    end.getMonth(),
-    end.getDate()
-  );
-
+  const a = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate());
+  const b = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate());
   return Math.round((b - a) / 86400000);
 }
 
 function formatDate(value) {
   const date = typeof value === "string" ? parseDate(value) : value;
-
   return date.toLocaleDateString("en-GB", {
     day: "numeric",
     month: "long",
@@ -69,23 +64,99 @@ function readJSON(key, fallback) {
   }
 }
 
-function normaliseMedication(medication) {
-  const history =
-    Array.isArray(medication.collections) &&
-    medication.collections.length > 0
-      ? medication.collections
-      : [
-          {
-            id: crypto.randomUUID(),
-            date: medication.collectionDate,
-            quantity: Number(medication.quantity),
-          },
-        ];
+function blankForm() {
+  return {
+    name: "",
+    quantity: "",
+    dailyQuantity: "",
+    collectionDate: localDate(),
+    frequency: "daily",
+    weekDay: 1,
+    monthDay: 1,
+    doses: [{ time: "09:00", quantity: "1" }],
+  };
+}
 
+function normaliseMedication(medication) {
   return {
     ...medication,
-    collections: history,
+    frequency: medication.frequency || "daily",
+    weekDay: Number(medication.weekDay ?? 1),
+    monthDay: Number(medication.monthDay ?? 1),
+    doses:
+      Array.isArray(medication.doses) && medication.doses.length
+        ? medication.doses
+        : [
+            {
+              time: "09:00",
+              quantity: Number(medication.dailyQuantity) || 1,
+            },
+          ],
+    collections:
+      Array.isArray(medication.collections) &&
+      medication.collections.length
+        ? medication.collections
+        : [
+            {
+              id: crypto.randomUUID(),
+              date: medication.collectionDate,
+              quantity: Number(medication.quantity),
+            },
+          ],
   };
+}
+
+function doseTotal(medication) {
+  return (medication.doses || []).reduce(
+    (total, dose) => total + Number(dose.quantity),
+    0
+  );
+}
+
+function isScheduled(medication, date) {
+  const day = typeof date === "string" ? parseDate(date) : date;
+
+  if (medication.frequency === "weekly") {
+    return day.getDay() === Number(medication.weekDay);
+  }
+
+  if (medication.frequency === "monthly") {
+    return day.getDate() === Number(medication.monthDay);
+  }
+
+  return true;
+}
+
+function supplyEnd(medication) {
+  const quantity = Number(medication.quantity);
+
+  if (medication.frequency === "daily") {
+    const daily = Number(medication.dailyQuantity);
+    return daily > 0
+      ? addDays(medication.collectionDate, Math.ceil(quantity / daily))
+      : null;
+  }
+
+  const total = doseTotal(medication);
+
+  if (!(total > 0)) return null;
+
+  let remaining = quantity;
+  let cursor = addDays(medication.collectionDate, 0);
+
+  for (let i = 0; i < 36600; i++) {
+    if (isScheduled(medication, cursor)) {
+      remaining -= total;
+
+      if (remaining <= 0) {
+        return addDays(cursor, 1);
+      }
+    }
+
+    cursor = addDays(cursor, 1);
+  }
+
+  return null;
 }
 
 function calculateSupply(medication) {
@@ -99,22 +170,34 @@ function calculateSupply(medication) {
     };
   }
 
-  const totalDays = Math.ceil(
-    Number(medication.quantity) / Number(medication.dailyQuantity)
+  const endDate = supplyEnd(medication);
+
+  if (!endDate) {
+    return {
+      ...medication,
+      totalDays: 0,
+      remaining: null,
+      endDate: null,
+      percentage: 0,
+    };
+  }
+
+  const totalDays = Math.max(
+    1,
+    daysBetween(parseDate(medication.collectionDate), endDate)
   );
 
-  const endDate = addDays(medication.collectionDate, totalDays);
   const remaining = daysBetween(new Date(), endDate);
 
   return {
     ...medication,
     totalDays,
-    endDate,
     remaining,
-    percentage:
-      totalDays > 0
-        ? Math.max(0, Math.min(100, (remaining / totalDays) * 100))
-        : 0,
+    endDate,
+    percentage: Math.max(
+      0,
+      Math.min(100, (remaining / totalDays) * 100)
+    ),
   };
 }
 
@@ -138,79 +221,77 @@ function getStatus(remaining) {
   return { text: "Supply on track", kind: "success" };
 }
 
-/* ---------------------------
-   ICONS
---------------------------- */
+function scheduleText(medication) {
+  const doses = (medication.doses || [])
+    .map((dose) => `${dose.quantity} at ${dose.time}`)
+    .join(", ");
+
+  if (medication.frequency === "weekly") {
+    return `Every ${WEEKDAYS[medication.weekDay]} · ${doses}`;
+  }
+
+  if (medication.frequency === "monthly") {
+    return `Monthly on day ${medication.monthDay} · ${doses}`;
+  }
+
+  return `Every day · ${doses}`;
+}
 
 function Icon({ name, size = 22 }) {
   const icons = {
     plus: <path d="M12 5v14M5 12h14" />,
-
     arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
-
     check: <path d="m4 12 5 5L20 6" />,
-
     close: <path d="M18 6 6 18M6 6l12 12" />,
-
     pill: (
       <>
         <path d="M10.5 3.5a6 6 0 0 1 8.5 8.5l-7 7a6 6 0 0 1-8.5-8.5z" />
         <path d="m8 8 8 8" />
       </>
     ),
-
     calendar: (
       <>
         <rect x="3" y="5" width="18" height="16" rx="2" />
         <path d="M7 3v4M17 3v4M3 10h18" />
       </>
     ),
-
     bell: (
       <>
         <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
         <path d="M10 21h4" />
       </>
     ),
-
     heart: (
       <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8z" />
     ),
-
     info: (
       <>
         <circle cx="12" cy="12" r="10" />
         <path d="M12 11v5M12 8h.01" />
       </>
     ),
-
     phone: (
       <path d="M22 16.9v3a2 2 0 0 1-2.2 2A19.7 19.7 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7l.5 2.8a2 2 0 0 1-.6 1.8L7.1 10a16 16 0 0 0 6.9 6.9l1.7-1.9a2 2 0 0 1 1.8-.6l2.8.5a2 2 0 0 1 1.7 2z" />
     ),
-
     archive: (
       <>
         <rect x="3" y="4" width="18" height="5" rx="1" />
         <path d="M5 9v11h14V9M10 13h4" />
       </>
     ),
-
     history: (
       <>
         <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
         <path d="M3 3v5h5M12 7v5l3 2" />
       </>
     ),
-
     search: (
       <>
         <circle cx="11" cy="11" r="7" />
         <path d="m16 16 5 5" />
       </>
     ),
-
     left: <path d="m15 18-6-6 6-6" />,
-
     right: <path d="m9 18 6-6-6-6" />,
   };
 
@@ -231,18 +312,9 @@ function Icon({ name, size = 22 }) {
   );
 }
 
-/* ---------------------------
-   INTERACTIVE CALENDAR
---------------------------- */
-
 function MedicationCalendar({ medications, archive }) {
   const [visibleMonth, setVisibleMonth] = useState(
-    () =>
-      new Date(
-        new Date().getFullYear(),
-        new Date().getMonth(),
-        1
-      )
+    () => new Date(new Date().getFullYear(), new Date().getMonth(), 1)
   );
 
   const [selectedDate, setSelectedDate] = useState(localDate());
@@ -250,90 +322,109 @@ function MedicationCalendar({ medications, archive }) {
   const year = visibleMonth.getFullYear();
   const month = visibleMonth.getMonth();
 
-  const firstWeekday =
-    (new Date(year, month, 1).getDay() + 6) % 7;
-
-  const daysInMonth =
-    new Date(year, month + 1, 0).getDate();
-
-  const calendarCells = [
-    ...Array(firstWeekday).fill(null),
-    ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+  const cells = [
+    ...Array((new Date(year, month, 1).getDay() + 6) % 7).fill(null),
+    ...Array.from(
+      { length: new Date(year, month + 1, 0).getDate() },
+      (_, index) => index + 1
+    ),
   ];
 
   const events = [];
 
   function addEvent(date, type, title, description) {
-    events.push({
-      date,
-      type,
-      title,
-      description,
-    });
+    events.push({ date, type, title, description });
   }
 
-  medications.forEach((med) => {
-    med.collections.forEach((collection) => {
+  const monthStart = localDate(new Date(year, month, 1));
+  const monthEnd = localDate(new Date(year, month + 1, 0));
+
+  medications.forEach((medication) => {
+    medication.collections.forEach((collection) => {
       addEvent(
         collection.date,
         "collection",
-        `${med.name} — collection recorded`,
+        `${medication.name} — collection recorded`,
         `${collection.quantity} tablets recorded as collected.`
       );
     });
 
-    if (med.needsNewCollection) return;
+    if (medication.needsNewCollection) return;
 
-    const supply = calculateSupply(med);
+    const supply = calculateSupply(medication);
+
+    if (!supply.endDate) return;
 
     [14, 7].forEach((days) => {
-      const reminderDate = localDate(
-        addDays(supply.endDate, -days)
-      );
-
       addEvent(
-        reminderDate,
+        localDate(addDays(supply.endDate, -days)),
         "reminder",
-        `${med.name} — ${days}-day reminder`,
-        "Check your repeat prescription arrangements with your pharmacy."
+        `${medication.name} — ${days}-day reminder`,
+        "Check repeat prescription arrangements with your pharmacy."
       );
     });
 
     addEvent(
       localDate(supply.endDate),
       "end",
-      `${med.name} — estimated supply end`,
-      "This is an estimate, not confirmation that medication has run out."
+      `${medication.name} — estimated supply end`,
+      "An estimate, not confirmation medication has run out."
     );
+
+    const first =
+      medication.collectionDate > monthStart
+        ? medication.collectionDate
+        : monthStart;
+
+    const last =
+      localDate(supply.endDate) < monthEnd
+        ? localDate(supply.endDate)
+        : monthEnd;
+
+    for (
+      let date = first;
+      date < last;
+      date = localDate(addDays(date, 1))
+    ) {
+      if (isScheduled(medication, date)) {
+        medication.doses.forEach((dose) => {
+          addEvent(
+            date,
+            "dose",
+            `${dose.time} — ${medication.name}`,
+            `${dose.quantity} tablet(s) scheduled (not a notification).`
+          );
+        });
+      }
+    }
   });
 
-  archive.forEach((med) => {
-    med.collections.forEach((collection) => {
+  archive.forEach((medication) => {
+    medication.collections.forEach((collection) => {
       addEvent(
         collection.date,
         "collection",
-        `${med.name} — previous collection`,
+        `${medication.name} — previous collection`,
         `${collection.quantity} tablets recorded as collected.`
       );
     });
 
-    if (med.archivedAt) {
+    if (medication.archivedAt) {
       addEvent(
-        med.archivedAt,
+        medication.archivedAt,
         "archive",
-        `${med.name} — archived`,
-        "This medication was moved to Medication History."
+        `${medication.name} — archived`,
+        "Moved to Medication History."
       );
     }
   });
 
-  const selectedEvents = events.filter(
-    (event) => event.date === selectedDate
-  );
+  const selectedEvents = events
+    .filter((event) => event.date === selectedDate)
+    .sort((a, b) => a.title.localeCompare(b.title));
 
   function changeMonth(amount) {
     const next = new Date(year, month + amount, 1);
-
     setVisibleMonth(next);
     setSelectedDate(localDate(next));
   }
@@ -383,34 +474,25 @@ function MedicationCalendar({ medications, archive }) {
           role="group"
           aria-label="Calendar dates"
         >
-          {["M", "T", "W", "T", "F", "S", "S"].map(
-            (day, index) => (
-              <span
-                className="calendar-weekday"
-                key={`weekday-${index}`}
-              >
-                {day}
-              </span>
-            )
-          )}
+          {["M", "T", "W", "T", "F", "S", "S"].map((day, index) => (
+            <span className="calendar-weekday" key={index}>
+              {day}
+            </span>
+          ))}
 
-          {calendarCells.map((day, index) => {
+          {cells.map((day, index) => {
             if (day === null) {
               return <span key={`blank-${index}`} />;
             }
 
-            const date = localDate(
-              new Date(year, month, day)
-            );
+            const date = localDate(new Date(year, month, day));
 
             const dateEvents = events.filter(
               (event) => event.date === date
             );
 
             const types = [
-              ...new Set(
-                dateEvents.map((event) => event.type)
-              ),
+              ...new Set(dateEvents.map((event) => event.type)),
             ];
 
             return (
@@ -424,21 +506,13 @@ function MedicationCalendar({ medications, archive }) {
                 ].join(" ")}
                 onClick={() => setSelectedDate(date)}
                 aria-pressed={date === selectedDate}
-                aria-label={`${formatDate(date)}, ${
-                  dateEvents.length
-                } recorded events`}
+                aria-label={`${formatDate(date)}, ${dateEvents.length} events`}
               >
                 <span>{day}</span>
 
-                <span
-                  className="calendar-dots"
-                  aria-hidden="true"
-                >
+                <span className="calendar-dots" aria-hidden="true">
                   {types.slice(0, 3).map((type) => (
-                    <i
-                      key={type}
-                      className={`dot-${type}`}
-                    />
+                    <i key={type} className={`dot-${type}`} />
                   ))}
                 </span>
               </button>
@@ -447,27 +521,21 @@ function MedicationCalendar({ medications, archive }) {
         </div>
 
         <div className="calendar-legend">
-          <span>
-            <i className="dot-collection" /> Collection
-          </span>
-
-          <span>
-            <i className="dot-reminder" /> Reminder
-          </span>
-
-          <span>
-            <i className="dot-end" /> Supply end
-          </span>
-
-          <span>
-            <i className="dot-archive" /> Archived
-          </span>
+          {[
+            ["dose", "Scheduled dose"],
+            ["collection", "Collection"],
+            ["reminder", "Reminder"],
+            ["end", "Supply end"],
+            ["archive", "Archived"],
+          ].map(([type, label]) => (
+            <span key={type}>
+              <i className={`dot-${type}`} />
+              {label}
+            </span>
+          ))}
         </div>
 
-        <div
-          className="calendar-detail"
-          aria-live="polite"
-        >
+        <div className="calendar-detail" aria-live="polite">
           <strong>{formatDate(selectedDate)}</strong>
 
           {selectedEvents.length === 0 ? (
@@ -494,14 +562,9 @@ function MedicationCalendar({ medications, archive }) {
   );
 }
 
-/* ---------------------------
-   MAIN APPLICATION
---------------------------- */
-
 function App() {
   const [medications, setMedications] = useState(() => {
     const saved = readJSON(STORAGE.medications, []);
-
     return Array.isArray(saved)
       ? saved.map(normaliseMedication)
       : [];
@@ -509,7 +572,6 @@ function App() {
 
   const [archive, setArchive] = useState(() => {
     const saved = readJSON(STORAGE.archive, []);
-
     return Array.isArray(saved)
       ? saved.map(normaliseMedication)
       : [];
@@ -520,9 +582,7 @@ function App() {
   );
 
   const [theme, setTheme] = useState(
-    () =>
-      localStorage.getItem(STORAGE.theme) ||
-      "warm"
+    () => localStorage.getItem(STORAGE.theme) || "warm"
   );
 
   const [largeText, setLargeText] = useState(() =>
@@ -530,8 +590,7 @@ function App() {
   );
 
   const [preferredName, setPreferredName] = useState(
-    () =>
-      localStorage.getItem(STORAGE.name) || ""
+    () => localStorage.getItem(STORAGE.name) || ""
   );
 
   const [emergency, setEmergency] = useState(() =>
@@ -551,12 +610,7 @@ function App() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
-  const [form, setForm] = useState({
-    name: "",
-    quantity: "",
-    dailyQuantity: "",
-    collectionDate: localDate(),
-  });
+  const [form, setForm] = useState(blankForm);
 
   const [formError, setFormError] = useState("");
   const [toast, setToast] = useState("");
@@ -574,8 +628,6 @@ function App() {
     },
   ]);
 
-  /* SAVE DATA */
-
   useEffect(() => {
     localStorage.setItem(
       STORAGE.medications,
@@ -584,17 +636,11 @@ function App() {
   }, [medications]);
 
   useEffect(() => {
-    localStorage.setItem(
-      STORAGE.archive,
-      JSON.stringify(archive)
-    );
+    localStorage.setItem(STORAGE.archive, JSON.stringify(archive));
   }, [archive]);
 
   useEffect(() => {
-    localStorage.setItem(
-      STORAGE.snoozed,
-      JSON.stringify(snoozed)
-    );
+    localStorage.setItem(STORAGE.snoozed, JSON.stringify(snoozed));
   }, [snoozed]);
 
   useEffect(() => {
@@ -609,10 +655,7 @@ function App() {
   }, [largeText]);
 
   useEffect(() => {
-    localStorage.setItem(
-      STORAGE.name,
-      preferredName
-    );
+    localStorage.setItem(STORAGE.name, preferredName);
   }, [preferredName]);
 
   useEffect(() => {
@@ -625,35 +668,30 @@ function App() {
   useEffect(() => {
     if (!toast) return;
 
-    const timer = setTimeout(() => {
-      setToast("");
-    }, 3500);
-
+    const timer = setTimeout(() => setToast(""), 3500);
     return () => clearTimeout(timer);
   }, [toast]);
-
-  /* DASHBOARD DATA */
 
   const active = medications.map(calculateSupply);
 
   const attentionCount = active.filter(
-    (med) =>
-      med.needsNewCollection ||
-      med.remaining <= 14
+    (medication) =>
+      medication.needsNewCollection ||
+      (medication.remaining !== null &&
+        medication.remaining <= 14)
   ).length;
 
   const reminders = active.filter(
-    (med) =>
-      !med.needsNewCollection &&
-      med.remaining <= 14 &&
-      (
-        !snoozed[med.id] ||
-        snoozed[med.id] <= localDate()
-      )
+    (medication) =>
+      !medication.needsNewCollection &&
+      medication.remaining !== null &&
+      medication.remaining <= 14 &&
+      (!snoozed[medication.id] ||
+        snoozed[medication.id] <= localDate())
   );
 
-  const filteredArchive = archive.filter((med) =>
-    med.name
+  const filteredArchive = archive.filter((medication) =>
+    medication.name
       .toLowerCase()
       .includes(historySearch.toLowerCase())
   );
@@ -667,42 +705,37 @@ function App() {
         ? "Good afternoon"
         : "Good evening";
 
-  /* FORM FUNCTIONS */
-
   function scrollToForm() {
     setTimeout(() => {
-      document
-        .getElementById("medication-form")
-        ?.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
+      document.getElementById("medication-form")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     }, 50);
   }
 
   function openAddForm() {
     setEditingId(null);
-
-    setForm({
-      name: "",
-      quantity: "",
-      dailyQuantity: "",
-      collectionDate: localDate(),
-    });
-
+    setForm(blankForm());
     setFormError("");
     setShowForm(true);
     scrollToForm();
   }
 
-  function openCollectionForm(med) {
-    setEditingId(med.id);
+  function openCollectionForm(medication) {
+    setEditingId(medication.id);
 
     setForm({
-      name: med.name,
-      quantity: "",
-      dailyQuantity: String(med.dailyQuantity),
-      collectionDate: localDate(),
+      ...blankForm(),
+      name: medication.name,
+      dailyQuantity: String(medication.dailyQuantity),
+      frequency: medication.frequency,
+      weekDay: medication.weekDay,
+      monthDay: medication.monthDay,
+      doses: medication.doses.map((dose) => ({
+        ...dose,
+        quantity: String(dose.quantity),
+      })),
     });
 
     setFormError("");
@@ -715,20 +748,23 @@ function App() {
 
     const name = form.name.trim();
     const quantity = Number(form.quantity);
-    const dailyQuantity = Number(form.dailyQuantity);
+    const totalPerScheduledDay = doseTotal(form);
+
+    const dailyQuantity =
+      form.frequency === "daily"
+        ? totalPerScheduledDay
+        : form.frequency === "weekly"
+          ? totalPerScheduledDay / 7
+          : totalPerScheduledDay / 30;
+
     const date = parseDate(form.collectionDate);
 
     if (!name) {
-      setFormError(
-        "Please enter the medication name."
-      );
+      setFormError("Please enter the medication name.");
       return;
     }
 
-    if (
-      !Number.isInteger(quantity) ||
-      quantity <= 0
-    ) {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
       setFormError(
         "Please enter a whole number of tablets greater than zero."
       );
@@ -736,11 +772,28 @@ function App() {
     }
 
     if (
-      !Number.isFinite(dailyQuantity) ||
-      dailyQuantity <= 0
+      !form.doses.length ||
+      form.doses.some(
+        (dose) =>
+          !/^([01]\d|2[0-3]):[0-5]\d$/.test(dose.time) ||
+          !Number.isFinite(Number(dose.quantity)) ||
+          Number(dose.quantity) <= 0
+      )
     ) {
       setFormError(
-        "Please enter a valid daily quantity."
+        "Enter a valid time and quantity greater than zero for every dose."
+      );
+      return;
+    }
+
+    if (
+      form.frequency === "monthly" &&
+      (!Number.isInteger(Number(form.monthDay)) ||
+        Number(form.monthDay) < 1 ||
+        Number(form.monthDay) > 28)
+    ) {
+      setFormError(
+        "Choose a day between 1 and 28 so the schedule works every month."
       );
       return;
     }
@@ -751,9 +804,7 @@ function App() {
       localDate(date) !== form.collectionDate ||
       form.collectionDate > localDate()
     ) {
-      setFormError(
-        "Please enter a valid collection date."
-      );
+      setFormError("Please enter a valid collection date.");
       return;
     }
 
@@ -763,23 +814,33 @@ function App() {
       quantity,
     };
 
+    const schedule = {
+      frequency: form.frequency,
+      weekDay: Number(form.weekDay),
+      monthDay: Number(form.monthDay),
+      doses: form.doses.map((dose) => ({
+        time: dose.time,
+        quantity: Number(dose.quantity),
+      })),
+    };
+
     if (editingId) {
       setMedications((old) =>
-        old.map((med) =>
-          med.id === editingId
+        old.map((medication) =>
+          medication.id === editingId
             ? {
-                ...med,
+                ...medication,
+                ...schedule,
                 quantity,
                 dailyQuantity,
-                collectionDate:
-                  form.collectionDate,
+                collectionDate: form.collectionDate,
                 collections: [
-                  ...med.collections,
+                  ...medication.collections,
                   collection,
                 ],
                 needsNewCollection: false,
               }
-            : med
+            : medication
         )
       );
 
@@ -789,9 +850,7 @@ function App() {
         return next;
       });
 
-      setToast(
-        "New collection recorded. Calendar updated."
-      );
+      setToast("New collection recorded. Calendar updated.");
     } else {
       setMedications((old) => [
         ...old,
@@ -800,27 +859,23 @@ function App() {
           name,
           quantity,
           dailyQuantity,
-          collectionDate:
-            form.collectionDate,
+          collectionDate: form.collectionDate,
           collections: [collection],
           needsNewCollection: false,
+          ...schedule,
         },
       ]);
 
-      setToast(
-        "Medication saved. Calendar updated."
-      );
+      setToast("Medication saved. Calendar updated.");
     }
 
     setShowForm(false);
     setEditingId(null);
   }
 
-  /* ARCHIVE FUNCTIONS */
-
-  function archiveMedication(med) {
+  function archiveMedication(medication) {
     const confirmed = window.confirm(
-      `Move "${med.name}" to Medication History?\n\n` +
+      `Move "${medication.name}" to Medication History?\n\n` +
         "It will disappear from active medications and stop showing refill reminders. You can restore it later."
     );
 
@@ -828,43 +883,41 @@ function App() {
 
     setArchive((old) => [
       {
-        ...med,
+        ...medication,
         archivedAt: localDate(),
       },
       ...old,
     ]);
 
     setMedications((old) =>
-      old.filter((item) => item.id !== med.id)
+      old.filter((item) => item.id !== medication.id)
     );
 
     setSnoozed((old) => {
       const next = { ...old };
-      delete next[med.id];
+      delete next[medication.id];
       return next;
     });
 
-    setToast(
-      "Medication moved to History."
-    );
+    setToast("Medication moved to History.");
   }
 
-  function restoreMedication(med) {
+  function restoreMedication(medication) {
     const confirmed = window.confirm(
-      `Restore "${med.name}" to active medications?\n\n` +
+      `Restore "${medication.name}" to active medications?\n\n` +
         "You'll need to record a new collection before supply reminders restart."
     );
 
     if (!confirmed) return;
 
     setArchive((old) =>
-      old.filter((item) => item.id !== med.id)
+      old.filter((item) => item.id !== medication.id)
     );
 
     setMedications((old) => [
       ...old,
       {
-        ...med,
+        ...medication,
         quantity: 0,
         collectionDate: localDate(),
         needsNewCollection: true,
@@ -872,41 +925,28 @@ function App() {
       },
     ]);
 
-    setToast(
-      "Medication restored. Record a new collection."
-    );
+    setToast("Medication restored. Record a new collection.");
 
     setTimeout(() => {
-      document
-        .getElementById("medications")
-        ?.scrollIntoView({
-          behavior: "smooth",
-        });
+      document.getElementById("medications")?.scrollIntoView({
+        behavior: "smooth",
+      });
     }, 50);
   }
-
-  /* REMINDERS */
 
   function snoozeReminder(id) {
     setSnoozed((old) => ({
       ...old,
-      [id]: localDate(
-        addDays(localDate(), 1)
-      ),
+      [id]: localDate(addDays(localDate(), 1)),
     }));
 
-    setToast(
-      "Reminder hidden until tomorrow."
-    );
+    setToast("Reminder hidden until tomorrow.");
   }
-
-  /* DEMO CHAT */
 
   function sendMessage(event) {
     event.preventDefault();
 
     const text = chatInput.trim();
-
     if (!text) return;
 
     const input = text.toLowerCase();
@@ -919,16 +959,19 @@ function App() {
         "Open Medication History to see previously tracked medications. You can view collection records or restore a medication.";
     } else if (/calendar|date|month/.test(input)) {
       reply =
-        "The calendar shows recorded collection dates, estimated refill reminders and supply end dates. Select any date to see details.";
+        "The calendar shows scheduled dose times, collection dates, refill reminders and estimated supply dates. Select any date to see details.";
+    } else if (/weekly|monday|daily|schedule|time|dose/.test(input)) {
+      reply =
+        "When adding medication, choose Daily, Weekly or Monthly. Select a day if needed, then add one or more prescribed dose times. These are calendar entries, not alarms.";
     } else if (/collect|tablet|add|medication/.test(input)) {
       reply =
-        "Select Add medication and enter the medication name, quantity, daily amount and collection date. For an existing medication, select I've collected more.";
+        "Select Add medication, enter the collection details and prescribed schedule, then save. For an existing medication, select I've collected more.";
     } else if (/remind|refill|run out|supply/.test(input)) {
       reply =
-        "CareNest estimates when your supply may end and shows in-app reminders when 14 days or fewer remain. Check arrangements with your pharmacy.";
+        "CareNest estimates supply dates and shows in-app refill reminders when 14 days or fewer remain. Check arrangements with your pharmacy.";
     } else if (/emergency|allerg|contact/.test(input)) {
       reply =
-        "Open Emergency details to enter important contacts and self-reported information. In a UK emergency, call 999.";
+        "Open Emergency details to enter contacts and self-reported information. In a UK emergency, call 999.";
     } else if (/theme|dark|contrast|font|text/.test(input)) {
       reply =
         "Use Display at the top to choose Warm, Dark or High Contrast. Select Larger text if you'd like bigger writing.";
@@ -936,14 +979,8 @@ function App() {
 
     setMessages((old) => [
       ...old,
-      {
-        role: "user",
-        text,
-      },
-      {
-        role: "assistant",
-        text: reply,
-      },
+      { role: "user", text },
+      { role: "assistant", text: reply },
     ]);
 
     setChatInput("");
@@ -952,10 +989,6 @@ function App() {
   function telephone(value) {
     return `tel:${value.replace(/[^\d+]/g, "")}`;
   }
-
-  /* ---------------------------
-     WEBSITE
-  --------------------------- */
 
   return (
     <div
@@ -971,15 +1004,11 @@ function App() {
             <span className="logo-symbol">
               <Icon name="heart" size={21} />
             </span>
-
             CareNest
             <span className="logo-period">.</span>
           </a>
 
-          <nav
-            className="nav-links"
-            aria-label="Main navigation"
-          >
+          <nav className="nav-links" aria-label="Main navigation">
             <a href="#medications">Medications</a>
             <a href="#calendar">Calendar</a>
             <a href="#history">History</a>
@@ -990,19 +1019,14 @@ function App() {
           <div className="accessibility">
             <label className="display-control">
               <span>Display</span>
-
               <select
                 value={theme}
-                onChange={(event) =>
-                  setTheme(event.target.value)
-                }
+                onChange={(event) => setTheme(event.target.value)}
                 aria-label="Display theme"
               >
                 <option value="warm">Warm</option>
                 <option value="dark">Dark</option>
-                <option value="contrast">
-                  High contrast
-                </option>
+                <option value="contrast">High contrast</option>
               </select>
             </label>
 
@@ -1010,20 +1034,15 @@ function App() {
               type="button"
               className="text-button"
               aria-pressed={largeText}
-              onClick={() =>
-                setLargeText((old) => !old)
-              }
+              onClick={() => setLargeText((old) => !old)}
             >
-              {largeText
-                ? "A− Normal text"
-                : "A+ Larger text"}
+              {largeText ? "A− Normal text" : "A+ Larger text"}
             </button>
           </div>
         </div>
       </header>
 
       <main id="home">
-
         {/* HERO */}
 
         <section className="hero wrap">
@@ -1039,9 +1058,8 @@ function App() {
             </h1>
 
             <p className="hero-description">
-              An easier way to stay organised,
-              feel prepared and know when it's
-              time to check your next prescription.
+              An easier way to stay organised, feel prepared and know
+              when it's time to check your next prescription.
             </p>
 
             <div className="hero-buttons">
@@ -1054,10 +1072,7 @@ function App() {
                 <Icon name="arrow" size={19} />
               </button>
 
-              <a
-                href="#guide"
-                className="text-link"
-              >
+              <a href="#guide" className="text-link">
                 See how it works
                 <Icon name="arrow" size={18} />
               </a>
@@ -1065,8 +1080,7 @@ function App() {
 
             <p className="hero-small">
               <Icon name="heart" size={18} />
-              Designed for clarity, comfort
-              and independence.
+              Designed for clarity, comfort and independence.
             </p>
           </div>
 
@@ -1082,9 +1096,7 @@ function App() {
 
         <section className="welcome-strip wrap">
           <div>
-            <span className="small-label">
-              YOUR SPACE
-            </span>
+            <span className="small-label">YOUR SPACE</span>
 
             <h2>
               {greeting}
@@ -1111,14 +1123,10 @@ function App() {
               onSubmit={(event) => {
                 event.preventDefault();
                 setEditingName(false);
-                setToast(
-                  "Preferred name saved."
-                );
+                setToast("Preferred name saved.");
               }}
             >
-              <label htmlFor="preferred-name">
-                Preferred name
-              </label>
+              <label htmlFor="preferred-name">Preferred name</label>
 
               <div className="name-input-row">
                 <input
@@ -1126,9 +1134,7 @@ function App() {
                   value={preferredName}
                   maxLength="40"
                   onChange={(event) =>
-                    setPreferredName(
-                      event.target.value
-                    )
+                    setPreferredName(event.target.value)
                   }
                   placeholder="Your first name"
                 />
@@ -1145,9 +1151,7 @@ function App() {
             <button
               type="button"
               className="button button-outline"
-              onClick={() =>
-                setEditingName(true)
-              }
+              onClick={() => setEditingName(true)}
             >
               {preferredName
                 ? "Change my name"
@@ -1158,65 +1162,44 @@ function App() {
 
         {/* HOW TO USE */}
 
-        <section
-          className="intro-section wrap"
-          id="guide"
-        >
+        <section className="intro-section wrap" id="guide">
           <div className="intro-heading">
             <div>
-              <p className="overline">
-                GETTING STARTED
-              </p>
-
-              <h2>
-                Care that feels uncomplicated.
-              </h2>
+              <p className="overline">GETTING STARTED</p>
+              <h2>Care that feels uncomplicated.</h2>
             </div>
 
             <p>
-              Designed with older adults in mind.
-              Clear instructions, readable text
-              and three simple steps.
+              Designed with older adults in mind. Clear instructions,
+              readable text and three simple steps.
             </p>
           </div>
 
           <div className="steps">
             <article className="step">
-              <span className="step-number">
-                01
-              </span>
-
+              <span className="step-number">01</span>
               <h3>Add your medication</h3>
-
               <p>
-                Record what you've collected
-                and your prescribed daily quantity.
+                Record what you've collected and your prescribed
+                daily, weekly or monthly schedule.
               </p>
             </article>
 
             <article className="step">
-              <span className="step-number">
-                02
-              </span>
-
+              <span className="step-number">02</span>
               <h3>Check your calendar</h3>
-
               <p>
-                See collection dates, refill
+                See scheduled dose times, collection dates, refill
                 reminders and estimated supply dates.
               </p>
             </article>
 
             <article className="step">
-              <span className="step-number">
-                03
-              </span>
-
+              <span className="step-number">03</span>
               <h3>Keep your history</h3>
-
               <p>
-                Archive old medications and
-                find their records whenever needed.
+                Archive old medications and find their records
+                whenever needed.
               </p>
             </article>
           </div>
@@ -1227,21 +1210,12 @@ function App() {
         <section className="dashboard-section wrap">
           <div className="section-intro">
             <div>
-              <p className="overline">
-                YOUR OVERVIEW
-              </p>
-
-              <h2>
-                Everything in one place.
-              </h2>
+              <p className="overline">YOUR OVERVIEW</p>
+              <h2>Everything in one place.</h2>
             </div>
 
             <span className="date-label">
-              <Icon
-                name="calendar"
-                size={18}
-              />
-
+              <Icon name="calendar" size={18} />
               {formatDate(new Date())}
             </span>
           </div>
@@ -1251,42 +1225,24 @@ function App() {
               <span className="overview-icon">
                 <Icon name="pill" />
               </span>
-
-              <strong>
-                {medications.length}
-              </strong>
-
-              <span>
-                Active medications
-              </span>
+              <strong>{medications.length}</strong>
+              <span>Active medications</span>
             </div>
 
             <div className="overview-item">
               <span className="overview-icon">
                 <Icon name="bell" />
               </span>
-
-              <strong>
-                {attentionCount}
-              </strong>
-
-              <span>
-                May need attention
-              </span>
+              <strong>{attentionCount}</strong>
+              <span>May need attention</span>
             </div>
 
             <div className="overview-item">
               <span className="overview-icon">
                 <Icon name="archive" />
               </span>
-
-              <strong>
-                {archive.length}
-              </strong>
-
-              <span>
-                In medication history
-              </span>
+              <strong>{archive.length}</strong>
+              <span>In medication history</span>
             </div>
           </div>
         </section>
@@ -1300,9 +1256,7 @@ function App() {
           >
             <div className="section-top">
               <div>
-                <p className="overline">
-                  MEDICATION DETAILS
-                </p>
+                <p className="overline">MEDICATION DETAILS</p>
 
                 <h2>
                   {editingId
@@ -1311,17 +1265,15 @@ function App() {
                 </h2>
 
                 <p className="section-subtitle">
-                  Enter the details from
-                  your medication packaging.
+                  Enter the details from your medication packaging
+                  and prescribed schedule.
                 </p>
               </div>
 
               <button
                 type="button"
                 className="close-button"
-                onClick={() =>
-                  setShowForm(false)
-                }
+                onClick={() => setShowForm(false)}
                 aria-label="Close form"
               >
                 <Icon name="close" />
@@ -1330,11 +1282,8 @@ function App() {
 
             <form onSubmit={saveMedication}>
               <div className="form-grid">
-
                 <div className="field">
-                  <label htmlFor="med-name">
-                    Medication name
-                  </label>
+                  <label htmlFor="med-name">Medication name</label>
 
                   <input
                     id="med-name"
@@ -1374,32 +1323,7 @@ function App() {
                 </div>
 
                 <div className="field">
-                  <label htmlFor="med-daily">
-                    Tablets prescribed per day
-                  </label>
-
-                  <input
-                    id="med-daily"
-                    type="number"
-                    min="0.5"
-                    step="0.5"
-                    value={form.dailyQuantity}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        dailyQuantity:
-                          event.target.value,
-                      })
-                    }
-                    placeholder="e.g. 2"
-                    required
-                  />
-                </div>
-
-                <div className="field">
-                  <label htmlFor="med-date">
-                    Date collected
-                  </label>
+                  <label htmlFor="med-date">Date collected</label>
 
                   <input
                     id="med-date"
@@ -1409,27 +1333,210 @@ function App() {
                     onChange={(event) =>
                       setForm({
                         ...form,
-                        collectionDate:
-                          event.target.value,
+                        collectionDate: event.target.value,
                       })
                     }
                     required
                   />
                 </div>
+
+                <div className="field">
+                  <label htmlFor="med-frequency">
+                    How often is it prescribed?
+                  </label>
+
+                  <select
+                    id="med-frequency"
+                    value={form.frequency}
+                    onChange={(event) =>
+                      setForm({
+                        ...form,
+                        frequency: event.target.value,
+                      })
+                    }
+                  >
+                    <option value="daily">Every day</option>
+                    <option value="weekly">
+                      Once a week (one chosen day)
+                    </option>
+                    <option value="monthly">
+                      Once a month (one chosen date)
+                    </option>
+                  </select>
+                </div>
+
+                {form.frequency === "weekly" && (
+                  <div className="field">
+                    <label htmlFor="med-weekday">
+                      Day of the week
+                    </label>
+
+                    <select
+                      id="med-weekday"
+                      value={form.weekDay}
+                      onChange={(event) =>
+                        setForm({
+                          ...form,
+                          weekDay: Number(event.target.value),
+                        })
+                      }
+                    >
+                      {WEEKDAYS.map((day, index) => (
+                        <option key={day} value={index}>
+                          {day}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {form.frequency === "monthly" && (
+                  <div className="field">
+                    <label htmlFor="med-monthday">
+                      Day of each month
+                    </label>
+
+                    <select
+                      id="med-monthday"
+                      value={form.monthDay}
+                      onChange={(event) =>
+                        setForm({
+                          ...form,
+                          monthDay: Number(event.target.value),
+                        })
+                      }
+                    >
+                      {Array.from({ length: 28 }, (_, index) => (
+                        <option
+                          key={index + 1}
+                          value={index + 1}
+                        >
+                          {index + 1}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="dose-editor">
+                <h3>Prescribed dose times</h3>
+
+                <p className="help-note">
+                  Add each time and how many tablets are taken at
+                  that time. For weekly or monthly medication, these
+                  times apply only on the selected day.
+                </p>
+
+                <div className="schedule-dose-list">
+                  {form.doses.map((dose, index) => (
+                    <div
+                      className="schedule-dose-row"
+                      key={index}
+                    >
+                      <div className="field">
+                        <label htmlFor={`dose-time-${index}`}>
+                          Time {index + 1}
+                        </label>
+
+                        <input
+                          id={`dose-time-${index}`}
+                          type="time"
+                          value={dose.time}
+                          onChange={(event) =>
+                            setForm((old) => ({
+                              ...old,
+                              doses: old.doses.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? {
+                                      ...item,
+                                      time: event.target.value,
+                                    }
+                                  : item
+                              ),
+                            }))
+                          }
+                          required
+                        />
+                      </div>
+
+                      <div className="field">
+                        <label htmlFor={`dose-qty-${index}`}>
+                          Tablets at this time
+                        </label>
+
+                        <input
+                          id={`dose-qty-${index}`}
+                          type="number"
+                          min="0.5"
+                          step="0.5"
+                          value={dose.quantity}
+                          onChange={(event) =>
+                            setForm((old) => ({
+                              ...old,
+                              doses: old.doses.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? {
+                                      ...item,
+                                      quantity: event.target.value,
+                                    }
+                                  : item
+                              ),
+                            }))
+                          }
+                          required
+                        />
+                      </div>
+
+                      {form.doses.length > 1 && (
+                        <button
+                          className="button button-outline"
+                          type="button"
+                          onClick={() =>
+                            setForm((old) => ({
+                              ...old,
+                              doses: old.doses.filter(
+                                (_, itemIndex) => itemIndex !== index
+                              ),
+                            }))
+                          }
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="action-row">
+                  <button
+                    className="button button-outline"
+                    type="button"
+                    onClick={() =>
+                      setForm((old) => ({
+                        ...old,
+                        doses: [
+                          ...old.doses,
+                          { time: "14:00", quantity: "1" },
+                        ],
+                      }))
+                    }
+                  >
+                    <Icon name="plus" size={18} />
+                    Add another time
+                  </button>
+                </div>
               </div>
 
               <p className="help-note">
-                Supply dates are estimates
-                for fixed daily quantities.
-                Always follow your
-                prescribed instructions.
+                Estimated supply assumes each scheduled dose is
+                taken. Times appear in the calendar only; CareNest
+                does not send alarms or notifications. Always follow
+                your prescription or pharmacist.
               </p>
 
               {formError && (
-                <p
-                  className="error-message"
-                  role="alert"
-                >
+                <p className="error-message" role="alert">
                   {formError}
                 </p>
               )}
@@ -1439,10 +1546,7 @@ function App() {
                   type="submit"
                   className="button button-primary"
                 >
-                  <Icon
-                    name="check"
-                    size={19}
-                  />
+                  <Icon name="check" size={19} />
 
                   {editingId
                     ? "Save new collection"
@@ -1452,9 +1556,7 @@ function App() {
                 <button
                   type="button"
                   className="button button-outline"
-                  onClick={() =>
-                    setShowForm(false)
-                  }
+                  onClick={() => setShowForm(false)}
                 >
                   Cancel
                 </button>
@@ -1478,7 +1580,7 @@ function App() {
               <h2>My medications</h2>
 
               <p className="section-subtitle">
-                Your current medications
+                Your current medications, prescribed schedules
                 and estimated supply.
               </p>
             </div>
@@ -1488,11 +1590,7 @@ function App() {
               className="button button-primary"
               onClick={openAddForm}
             >
-              <Icon
-                name="plus"
-                size={19}
-              />
-
+              <Icon name="plus" size={19} />
               Add new
             </button>
           </div>
@@ -1500,19 +1598,13 @@ function App() {
           {active.length === 0 ? (
             <div className="empty-state">
               <span className="empty-icon">
-                <Icon
-                  name="pill"
-                  size={32}
-                />
+                <Icon name="pill" size={32} />
               </span>
 
-              <h3>
-                Let's get you started.
-              </h3>
+              <h3>Let's get you started.</h3>
 
               <p>
-                Your medications will
-                appear here once you've
+                Your medications will appear here once you've
                 added them.
               </p>
 
@@ -1526,26 +1618,23 @@ function App() {
             </div>
           ) : (
             <div className="medication-list">
-              {active.map((med) => {
-
-                if (med.needsNewCollection) {
+              {active.map((medication) => {
+                if (medication.needsNewCollection) {
                   return (
                     <article
                       className="medication-row"
-                      key={med.id}
+                      key={medication.id}
                     >
                       <div className="medication-main">
                         <span className="medication-symbol">
-                          <Icon
-                            name="pill"
-                            size={26}
-                          />
+                          <Icon name="pill" size={26} />
                         </span>
 
                         <div>
-                          <h3>{med.name}</h3>
+                          <h3>{medication.name}</h3>
                           <p>
-                            Restored from history
+                            Restored from history ·{" "}
+                            {scheduleText(medication)}
                           </p>
                         </div>
 
@@ -1555,15 +1644,15 @@ function App() {
                       </div>
 
                       <p className="help-note">
-                        Record your latest collection
-                        to restart supply estimates.
+                        Record your latest collection to restart
+                        supply estimates.
                       </p>
 
                       <button
                         type="button"
                         className="button button-primary"
                         onClick={() =>
-                          openCollectionForm(med)
+                          openCollectionForm(medication)
                         }
                       >
                         Record new collection
@@ -1572,37 +1661,34 @@ function App() {
                   );
                 }
 
-                const state = getStatus(
-                  med.remaining
-                );
+                const status = getStatus(medication.remaining);
 
                 return (
                   <article
                     className="medication-row"
-                    key={med.id}
+                    key={medication.id}
                   >
                     <div className="medication-main">
                       <span className="medication-symbol">
-                        <Icon
-                          name="pill"
-                          size={26}
-                        />
+                        <Icon name="pill" size={26} />
                       </span>
 
                       <div>
-                        <h3>{med.name}</h3>
+                        <h3>{medication.name}</h3>
 
                         <p>
-                          {med.quantity} tablets
-                          collected ·{" "}
-                          {med.dailyQuantity} per day
+                          {medication.quantity} tablets collected
+                        </p>
+
+                        <p className="schedule-description">
+                          {scheduleText(medication)}
                         </p>
                       </div>
 
                       <span
-                        className={`status status-${state.kind}`}
+                        className={`status status-${status.kind}`}
                       >
-                        {state.text}
+                        {status.text}
                       </span>
                     </div>
 
@@ -1611,24 +1697,20 @@ function App() {
                         <strong>
                           {Math.max(
                             0,
-                            med.remaining
+                            medication.remaining ?? 0
                           )}
                         </strong>
 
-                        <span>
-                          estimated days remaining
-                        </span>
+                        <span>estimated days remaining</span>
                       </div>
 
                       <div className="end-date">
-                        <span>
-                          Estimated supply end
-                        </span>
+                        <span>Estimated supply end</span>
 
                         <strong>
-                          {formatDate(
-                            med.endDate
-                          )}
+                          {medication.endDate
+                            ? formatDate(medication.endDate)
+                            : "Not available"}
                         </strong>
                       </div>
                     </div>
@@ -1636,17 +1718,17 @@ function App() {
                     <div
                       className="supply-bar"
                       role="progressbar"
-                      aria-label={`Estimated supply remaining for ${med.name}`}
+                      aria-label={`Estimated supply remaining for ${medication.name}`}
                       aria-valuemin="0"
                       aria-valuemax="100"
                       aria-valuenow={Math.round(
-                        med.percentage
+                        medication.percentage
                       )}
                     >
                       <span
-                        className={`supply-fill fill-${state.kind}`}
+                        className={`supply-fill fill-${status.kind}`}
                         style={{
-                          width: `${med.percentage}%`,
+                          width: `${medication.percentage}%`,
                         }}
                       />
                     </div>
@@ -1656,7 +1738,7 @@ function App() {
                         type="button"
                         className="button button-primary"
                         onClick={() =>
-                          openCollectionForm(med)
+                          openCollectionForm(medication)
                         }
                       >
                         I've collected more
@@ -1666,14 +1748,10 @@ function App() {
                         type="button"
                         className="button button-outline"
                         onClick={() =>
-                          archiveMedication(med)
+                          archiveMedication(medication)
                         }
                       >
-                        <Icon
-                          name="archive"
-                          size={18}
-                        />
-
+                        <Icon name="archive" size={18} />
                         Archive medication
                       </button>
                     </div>
@@ -1681,18 +1759,16 @@ function App() {
                     <details className="collection-details">
                       <summary>
                         View collection history (
-                        {med.collections.length})
+                        {medication.collections.length})
                       </summary>
 
                       <ul>
-                        {[...med.collections]
+                        {[...medication.collections]
                           .reverse()
                           .map((entry) => (
                             <li key={entry.id}>
                               <span>
-                                {formatDate(
-                                  entry.date
-                                )}
+                                {formatDate(entry.date)}
                               </span>
 
                               <strong>
@@ -1717,80 +1793,62 @@ function App() {
         >
           <div className="section-top">
             <div>
-              <p className="overline">
-                LOOKING AHEAD
-              </p>
-
-              <h2>
-                Medication reminders
-              </h2>
+              <p className="overline">LOOKING AHEAD</p>
+              <h2>Medication reminders</h2>
 
               <p className="section-subtitle">
-                Gentle reminders to check
-                your repeat prescription
+                Gentle reminders to check your repeat prescription
                 arrangements.
               </p>
             </div>
 
             <span className="section-icon">
-              <Icon
-                name="bell"
-                size={26}
-              />
+              <Icon name="bell" size={26} />
             </span>
           </div>
 
           {reminders.length === 0 ? (
             <div className="clear-message">
               <span className="clear-symbol">
-                <Icon
-                  name="check"
-                  size={25}
-                />
+                <Icon name="check" size={25} />
               </span>
 
               <div>
                 <h3>
-                  Nothing needs your attention
-                  right now.
+                  Nothing needs your attention right now.
                 </h3>
 
                 <p>
-                  In-app reminders appear when
-                  an estimated supply reaches
-                  14 days or fewer.
+                  In-app reminders appear when an estimated
+                  supply reaches 14 days or fewer.
                 </p>
               </div>
             </div>
           ) : (
             <div className="reminder-list">
-              {reminders.map((med) => (
+              {reminders.map((medication) => (
                 <article
                   className="reminder-item"
-                  key={med.id}
+                  key={medication.id}
                 >
                   <span className="reminder-symbol">
-                    <Icon
-                      name="bell"
-                      size={25}
-                    />
+                    <Icon name="bell" size={25} />
                   </span>
 
                   <div>
                     <h3>
-                      Time to check: {med.name}
+                      Time to check: {medication.name}
                     </h3>
 
                     <p>
-                      {med.remaining > 0
-                        ? `Your estimated supply may end in ${med.remaining} days.`
+                      {medication.remaining > 0
+                        ? `Your estimated supply may end in ${medication.remaining} days.`
                         : "Your estimated supply end date has passed."}
                     </p>
 
                     <p>
-                      Please check your repeat
-                      prescription arrangements
-                      with your pharmacy.
+                      Please check your repeat prescription
+                      arrangements with your pharmacy.
                     </p>
 
                     <div className="action-row">
@@ -1798,7 +1856,7 @@ function App() {
                         type="button"
                         className="button button-primary"
                         onClick={() =>
-                          openCollectionForm(med)
+                          openCollectionForm(medication)
                         }
                       >
                         I've collected more
@@ -1808,7 +1866,7 @@ function App() {
                         type="button"
                         className="button button-outline"
                         onClick={() =>
-                          snoozeReminder(med.id)
+                          snoozeReminder(medication.id)
                         }
                       >
                         Remind me tomorrow
@@ -1829,33 +1887,21 @@ function App() {
         >
           <div className="section-top">
             <div>
-              <p className="overline">
-                YOUR RECORDS
-              </p>
-
-              <h2>
-                Medication history
-              </h2>
+              <p className="overline">YOUR RECORDS</p>
+              <h2>Medication history</h2>
 
               <p className="section-subtitle">
-                A place to keep previously
-                tracked medications.
+                A place to keep previously tracked medications.
               </p>
             </div>
 
             <span className="section-icon">
-              <Icon
-                name="archive"
-                size={27}
-              />
+              <Icon name="archive" size={27} />
             </span>
           </div>
 
           <label className="history-search">
-            <Icon
-              name="search"
-              size={21}
-            />
+            <Icon name="search" size={21} />
 
             <span className="sr-only">
               Search medication history
@@ -1865,9 +1911,7 @@ function App() {
               type="search"
               value={historySearch}
               onChange={(event) =>
-                setHistorySearch(
-                  event.target.value
-                )
+                setHistorySearch(event.target.value)
               }
               placeholder="Search your medication history..."
             />
@@ -1876,51 +1920,39 @@ function App() {
           {archive.length === 0 ? (
             <div className="empty-state">
               <span className="empty-icon">
-                <Icon
-                  name="history"
-                  size={31}
-                />
+                <Icon name="history" size={31} />
               </span>
 
-              <h3>
-                Your history will appear here.
-              </h3>
+              <h3>Your history will appear here.</h3>
 
               <p>
-                When you archive a medication,
-                its details and recorded
-                collections will be kept
-                in this section.
+                When you archive a medication, its details and
+                recorded collections will be kept in this section.
               </p>
             </div>
           ) : filteredArchive.length === 0 ? (
             <p className="search-empty">
-              No archived medications
-              match your search.
+              No archived medications match your search.
             </p>
           ) : (
             <div className="archive-list">
-              {filteredArchive.map((med) => (
+              {filteredArchive.map((medication) => (
                 <article
                   className="archive-item"
-                  key={med.id}
+                  key={medication.id}
                 >
                   <div className="archive-heading">
                     <span className="medication-symbol">
-                      <Icon
-                        name="archive"
-                        size={25}
-                      />
+                      <Icon name="archive" size={25} />
                     </span>
 
                     <div>
-                      <h3>{med.name}</h3>
+                      <h3>{medication.name}</h3>
 
                       <p>
                         Archived{" "}
                         {formatDate(
-                          med.archivedAt ||
-                          localDate()
+                          medication.archivedAt || localDate()
                         )}
                       </p>
                     </div>
@@ -1932,13 +1964,11 @@ function App() {
 
                   <p className="archive-description">
                     Last recorded collection:{" "}
-                    {formatDate(
-                      med.collectionDate
-                    )}
+                    {formatDate(medication.collectionDate)}
                     {" · "}
-                    {med.quantity} tablets
+                    {medication.quantity} tablets
                     {" · "}
-                    {med.dailyQuantity} per day
+                    {scheduleText(medication)}
                   </p>
 
                   <div className="action-row">
@@ -1946,23 +1976,19 @@ function App() {
                       type="button"
                       className="button button-outline"
                       aria-expanded={
-                        expandedHistory === med.id
+                        expandedHistory === medication.id
                       }
                       onClick={() =>
-                        setExpandedHistory(
-                          (old) =>
-                            old === med.id
-                              ? null
-                              : med.id
+                        setExpandedHistory((old) =>
+                          old === medication.id
+                            ? null
+                            : medication.id
                         )
                       }
                     >
-                      <Icon
-                        name="history"
-                        size={18}
-                      />
+                      <Icon name="history" size={18} />
 
-                      {expandedHistory === med.id
+                      {expandedHistory === medication.id
                         ? "Hide collection history"
                         : "View collection history"}
                     </button>
@@ -1971,28 +1997,24 @@ function App() {
                       type="button"
                       className="button button-primary"
                       onClick={() =>
-                        restoreMedication(med)
+                        restoreMedication(medication)
                       }
                     >
                       Restore medication
                     </button>
                   </div>
 
-                  {expandedHistory === med.id && (
+                  {expandedHistory === medication.id && (
                     <div className="archive-collections">
-                      <h4>
-                        Recorded collections
-                      </h4>
+                      <h4>Recorded collections</h4>
 
                       <ul>
-                        {[...med.collections]
+                        {[...medication.collections]
                           .reverse()
                           .map((entry) => (
                             <li key={entry.id}>
                               <span>
-                                {formatDate(
-                                  entry.date
-                                )}
+                                {formatDate(entry.date)}
                               </span>
 
                               <strong>
@@ -2009,10 +2031,8 @@ function App() {
           )}
 
           <p className="history-note">
-            These are your own records,
-            not verified pharmacy or
-            prescription records.
-            Archiving stops refill reminders
+            These are your own records, not verified pharmacy or
+            prescription records. Archiving stops refill reminders
             for that medication.
           </p>
         </section>
@@ -2026,10 +2046,7 @@ function App() {
           <div className="emergency-top">
             <div className="emergency-copy">
               <span className="emergency-mark">
-                <Icon
-                  name="heart"
-                  size={27}
-                />
+                <Icon name="heart" size={27} />
               </span>
 
               <div>
@@ -2037,14 +2054,10 @@ function App() {
                   IMPORTANT INFORMATION
                 </p>
 
-                <h2>
-                  Emergency details,
-                  close at hand.
-                </h2>
+                <h2>Emergency details, close at hand.</h2>
 
                 <p>
-                  Keep your contacts,
-                  allergies and important
+                  Keep your contacts, allergies and important
                   notes in one easy-to-find place.
                 </p>
               </div>
@@ -2055,46 +2068,32 @@ function App() {
               className="button button-light"
               aria-expanded={showEmergency}
               onClick={() =>
-                setShowEmergency(
-                  (old) => !old
-                )
+                setShowEmergency((old) => !old)
               }
             >
               {showEmergency
                 ? "Hide details"
                 : "View or edit details"}
 
-              <Icon
-                name="arrow"
-                size={19}
-              />
+              <Icon name="arrow" size={19} />
             </button>
           </div>
 
           {showEmergency && (
             <div className="emergency-details">
               <div className="emergency-warning">
-                <Icon
-                  name="info"
-                  size={22}
-                />
+                <Icon name="info" size={22} />
 
                 <p>
-                  These details are self-reported,
-                  not a verified medical record.
-                  In a UK emergency, call 999.
-                  Do not delay getting help
-                  to find this page.
+                  These details are self-reported, not a verified
+                  medical record. In a UK emergency, call 999.
+                  Do not delay getting help to find this page.
                 </p>
               </div>
 
               <div className="form-grid">
                 {[
-                  [
-                    "patientName",
-                    "Full name",
-                    "Your full name",
-                  ],
+                  ["patientName", "Full name", "Your full name"],
                   [
                     "allergies",
                     "Allergies",
@@ -2120,41 +2119,30 @@ function App() {
                     "Second contact phone",
                     "Optional",
                   ],
-                ].map(
-                  ([name, label, placeholder]) => (
-                    <div
-                      className="field"
-                      key={name}
-                    >
-                      <label htmlFor={name}>
-                        {label}
-                      </label>
+                ].map(([name, label, placeholder]) => (
+                  <div className="field" key={name}>
+                    <label htmlFor={name}>{label}</label>
 
-                      <input
-                        id={name}
-                        name={name}
-                        type={
-                          name
-                            .toLowerCase()
-                            .includes("phone")
-                            ? "tel"
-                            : "text"
-                        }
-                        value={emergency[name]}
-                        onChange={(event) =>
-                          setEmergency(
-                            (old) => ({
-                              ...old,
-                              [event.target.name]:
-                                event.target.value,
-                            })
-                          )
-                        }
-                        placeholder={placeholder}
-                      />
-                    </div>
-                  )
-                )}
+                    <input
+                      id={name}
+                      name={name}
+                      type={
+                        name.toLowerCase().includes("phone")
+                          ? "tel"
+                          : "text"
+                      }
+                      value={emergency[name]}
+                      onChange={(event) =>
+                        setEmergency((old) => ({
+                          ...old,
+                          [event.target.name]:
+                            event.target.value,
+                        }))
+                      }
+                      placeholder={placeholder}
+                    />
+                  </div>
+                ))}
 
                 <div className="field full-field">
                   <label htmlFor="medicalNotes">
@@ -2165,17 +2153,12 @@ function App() {
                     id="medicalNotes"
                     name="medicalNotes"
                     rows="3"
-                    value={
-                      emergency.medicalNotes
-                    }
+                    value={emergency.medicalNotes}
                     onChange={(event) =>
-                      setEmergency(
-                        (old) => ({
-                          ...old,
-                          medicalNotes:
-                            event.target.value,
-                        })
-                      )
+                      setEmergency((old) => ({
+                        ...old,
+                        medicalNotes: event.target.value,
+                      }))
                     }
                     placeholder="Only enter information you're comfortable saving on this device."
                   />
@@ -2186,14 +2169,9 @@ function App() {
                 {emergency.contactPhone.trim() && (
                   <a
                     className="button button-primary"
-                    href={telephone(
-                      emergency.contactPhone
-                    )}
+                    href={telephone(emergency.contactPhone)}
                   >
-                    <Icon
-                      name="phone"
-                      size={19}
-                    />
+                    <Icon name="phone" size={19} />
 
                     Call{" "}
                     {emergency.contactName ||
@@ -2208,10 +2186,7 @@ function App() {
                       emergency.secondContactPhone
                     )}
                   >
-                    <Icon
-                      name="phone"
-                      size={19}
-                    />
+                    <Icon name="phone" size={19} />
 
                     Call{" "}
                     {emergency.secondContactName ||
@@ -2221,10 +2196,9 @@ function App() {
               </div>
 
               <p className="privacy-note">
-                Information saves in this browser
-                and is not encrypted.
-                Use fictional information
-                for the hackathon demo.
+                Information saves in this browser and is not
+                encrypted. Use fictional information for the
+                hackathon demo.
               </p>
             </div>
           )}
@@ -2238,17 +2212,11 @@ function App() {
         >
           <div className="section-top">
             <div>
-              <p className="overline">
-                A HELPING HAND
-              </p>
-
-              <h2>
-                Ask CareNest
-              </h2>
+              <p className="overline">A HELPING HAND</p>
+              <h2>Ask CareNest</h2>
 
               <p className="section-subtitle">
-                Questions about using
-                the website? Just ask.
+                Questions about using the website? Just ask.
               </p>
             </div>
 
@@ -2257,37 +2225,26 @@ function App() {
             </span>
           </div>
 
-          <div
-            className="chat-history"
-            aria-live="polite"
-          >
-            {messages.map(
-              (message, index) => (
-                <div
-                  className={`chat-line ${message.role}`}
-                  key={index}
-                >
-                  <span className="chat-icon">
-                    {message.role === "assistant"
-                      ? (
-                        <Icon
-                          name="heart"
-                          size={18}
-                        />
-                      )
-                      : "You"}
-                  </span>
+          <div className="chat-history" aria-live="polite">
+            {messages.map((message, index) => (
+              <div
+                className={`chat-line ${message.role}`}
+                key={index}
+              >
+                <span className="chat-icon">
+                  {message.role === "assistant" ? (
+                    <Icon name="heart" size={18} />
+                  ) : (
+                    "You"
+                  )}
+                </span>
 
-                  <p>{message.text}</p>
-                </div>
-              )
-            )}
+                <p>{message.text}</p>
+              </div>
+            ))}
           </div>
 
-          <form
-            className="chat-form"
-            onSubmit={sendMessage}
-          >
+          <form className="chat-form" onSubmit={sendMessage}>
             <label
               className="sr-only"
               htmlFor="chat-input"
@@ -2299,11 +2256,9 @@ function App() {
               id="chat-input"
               value={chatInput}
               onChange={(event) =>
-                setChatInput(
-                  event.target.value
-                )
+                setChatInput(event.target.value)
               }
-              placeholder="e.g. Where is my medication history?"
+              placeholder="e.g. How do I add a weekly medication?"
             />
 
             <button
@@ -2311,37 +2266,26 @@ function App() {
               type="submit"
             >
               Send
-
-              <Icon
-                name="arrow"
-                size={18}
-              />
+              <Icon name="arrow" size={18} />
             </button>
           </form>
 
           <p className="privacy-note">
-            Demo responses only.
-            The AI model is not connected yet.
+            Demo responses only. The AI model is not connected yet.
           </p>
         </section>
 
         {/* DISCLAIMER */}
 
         <aside className="disclaimer wrap">
-          <Icon
-            name="info"
-            size={22}
-          />
+          <Icon name="info" size={22} />
 
           <p>
-            <strong>
-              A note about CareNest:
-            </strong>{" "}
-            Supply dates are estimates
-            based on the information entered.
-            CareNest does not know whether
-            tablets have actually been taken
-            and does not provide medical advice.
+            <strong>A note about CareNest:</strong>{" "}
+            Supply dates assume every scheduled dose is taken and
+            are only estimates. CareNest does not know whether
+            tablets have actually been taken and does not provide
+            medical advice. Calendar times are not notifications.
           </p>
         </aside>
       </main>
@@ -2355,13 +2299,12 @@ function App() {
           </strong>
 
           <p>
-            Thoughtfully designed for
-            easier everyday medication management.
+            Thoughtfully designed for easier everyday medication
+            management.
           </p>
 
           <small>
-            Always follow guidance
-            from your GP or pharmacist.
+            Always follow guidance from your GP or pharmacist.
           </small>
         </div>
       </footer>
@@ -2369,15 +2312,8 @@ function App() {
       {/* SAVE CONFIRMATION */}
 
       {toast && (
-        <div
-          className="toast"
-          role="status"
-        >
-          <Icon
-            name="check"
-            size={20}
-          />
-
+        <div className="toast" role="status">
+          <Icon name="check" size={20} />
           {toast}
         </div>
       )}
