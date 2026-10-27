@@ -1,4 +1,4 @@
--- CareNest AI: run this once in Supabase -> SQL Editor -> New query -> Run.
+-- medAssist AI: run this once in Supabase -> SQL Editor -> New query -> Run.
 
 create table if not exists medications (
   id                  uuid primary key default gen_random_uuid(),
@@ -8,6 +8,8 @@ create table if not exists medications (
   collection_date     date not null,
   daily_quantity      numeric not null check (daily_quantity > 0),
   estimated_end_date  date not null,
+  details             jsonb not null default '{}'::jsonb, -- schedule, dose times, history (from the frontend)
+  archived            boolean not null default false,     -- moved to Medication History
   created_at          timestamptz not null default now()
 );
 
@@ -23,6 +25,10 @@ create table if not exists reminders (
   acknowledged_at date,
   created_at     timestamptz not null default now()
 );
+
+-- Already ran an older version of this file? These two lines add the new columns.
+alter table medications add column if not exists details jsonb not null default '{}'::jsonb;
+alter table medications add column if not exists archived boolean not null default false;
 
 create index if not exists medications_user_idx on medications (user_id);
 create index if not exists reminders_user_idx on reminders (user_id, status);

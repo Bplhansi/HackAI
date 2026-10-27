@@ -11,6 +11,33 @@ const STORAGE = {
   name: "carenest_preferred_name",
 };
 
+// Backend address. Set VITE_API_URL in frontend/.env (or in Netlify) when deployed.
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://localhost:8000"
+).replace(/\/$/, "");
+
+// Small helper for calling the backend. Throws an Error with the backend's message.
+async function api(path, options = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: { "Content-Type": "application/json" },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map((item) => item.msg).join(" ")
+      : data.detail;
+    const error = new Error(detail || "Something went wrong.");
+    error.status = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
 const WEEKDAYS = [
   "Sunday",
   "Monday",
@@ -111,6 +138,78 @@ function doseTotal(medication) {
     (total, dose) => total + Number(dose.quantity),
     0
   );
+}
+
+// What we keep in the server's "details" field: everything the server stores
+// for us but doesn't calculate with (schedule, dose times, collection history).
+function detailsOf(medication) {
+  return {
+    frequency: medication.frequency,
+    weekDay: medication.weekDay,
+    monthDay: medication.monthDay,
+    doses: medication.doses,
+    collections: medication.collections,
+    needsNewCollection: Boolean(medication.needsNewCollection),
+    archivedAt: medication.archivedAt || null,
+  };
+}
+
+// Turn a row from GET /medications back into the shape the dashboard uses.
+function fromServer(row) {
+  const details = row.details || {};
+
+  return normaliseMedication({
+    ...details,
+    id: row.id,
+    backendId: row.id,
+    name: row.name,
+    quantity: details.needsNewCollection ? 0 : row.quantity_collected,
+    dailyQuantity: Number(row.daily_quantity),
+    collectionDate: row.collection_date,
+    archived: row.archived,
+    archivedAt: details.archivedAt || undefined,
+  });
+}
+
+// Save one medication on the server. Returns the server's row, or throws.
+async function saveToServer(medication) {
+  const body = {
+    quantity_collected: medication.quantity,
+    collection_date: medication.collectionDate,
+    daily_quantity: Number(Number(medication.dailyQuantity).toFixed(4)),
+    details: detailsOf(medication),
+  };
+
+  const updateOn = async (medicationId) =>
+    (
+      await api("/medications/confirm-update", {
+        method: "POST",
+        body: { medication_id: medicationId, ...body },
+      })
+    ).medication;
+
+  if (medication.backendId) return updateOn(medication.backendId);
+
+  try {
+    const result = await api("/medications/confirm-add", {
+      method: "POST",
+      body: { medication_name: medication.name, ...body },
+    });
+    return result.medication;
+  } catch (error) {
+    if (error.status !== 409) throw error;
+
+    // The server already tracks this name: record a new collection on it instead.
+    const { medications: list } = await api("/medications");
+    const match = list.find(
+      (item) =>
+        !item.archived &&
+        item.name.toLowerCase() === medication.name.toLowerCase()
+    );
+    if (!match) throw error;
+
+    return updateOn(match.id);
+  }
 }
 
 function isScheduled(medication, date) {
@@ -619,12 +718,17 @@ function App() {
   const [expandedHistory, setExpandedHistory] = useState(null);
 
   const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+
+  // "loading", "online" (data comes from the server) or "offline" (this device only)
+  const [serverStatus, setServerStatus] = useState("loading");
+  const [saving, setSaving] = useState(false);
 
   const [messages, setMessages] = useState([
     {
       role: "assistant",
       text:
-        "Hello! I can help you use CareNest. Ask me how to add medication, view your calendar or find your medication history.",
+        'Hello! Tell me what you collected, for example "I picked up 60 tablets of ExampleMed today, one a day", and I\'ll fill in the form for you to check.',
     },
   ]);
 
@@ -664,6 +768,48 @@ function App() {
       JSON.stringify(emergency)
     );
   }, [emergency]);
+
+  // The server's database is the main copy. localStorage is only a cache for when
+  // the server can't be reached, so the page still works offline.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadFromServer() {
+      try {
+        const { medications: rows } = await api("/medications");
+
+        // One-time move: medications saved only in this browser before the
+        // server existed are uploaded, so they show up on every device.
+        const localOnly = readJSON(STORAGE.medications, [])
+          .map(normaliseMedication)
+          .filter((item) => !item.backendId && !item.needsNewCollection);
+        const kept = [];
+
+        for (const medication of localOnly) {
+          try {
+            rows.push(await saveToServer(medication));
+          } catch {
+            kept.push(medication);
+          }
+        }
+
+        if (cancelled) return;
+
+        const all = rows.map(fromServer);
+        setMedications([...all.filter((item) => !item.archived), ...kept]);
+        setArchive(all.filter((item) => item.archived));
+        setServerStatus("online");
+      } catch {
+        if (!cancelled) setServerStatus("offline");
+      }
+    }
+
+    loadFromServer();
+    return () => {
+      cancelled = true;
+    };
+    // Runs once when the page opens.
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -743,7 +889,7 @@ function App() {
     scrollToForm();
   }
 
-  function saveMedication(event) {
+  async function saveMedication(event) {
     event.preventDefault();
 
     const name = form.name.trim();
@@ -808,6 +954,8 @@ function App() {
       return;
     }
 
+    const current = medications.find((item) => item.id === editingId);
+
     const collection = {
       id: crypto.randomUUID(),
       date: form.collectionDate,
@@ -824,56 +972,121 @@ function App() {
       })),
     };
 
-    if (editingId) {
-      setMedications((old) =>
-        old.map((medication) =>
-          medication.id === editingId
-            ? {
-                ...medication,
-                ...schedule,
-                quantity,
-                dailyQuantity,
-                collectionDate: form.collectionDate,
-                collections: [
-                  ...medication.collections,
-                  collection,
-                ],
-                needsNewCollection: false,
-              }
-            : medication
-        )
-      );
+    const next = {
+      ...current,
+      ...schedule,
+      id: current ? current.id : crypto.randomUUID(),
+      name: current ? current.name : name,
+      quantity,
+      dailyQuantity,
+      collectionDate: form.collectionDate,
+      collections: [...(current?.collections || []), collection],
+      needsNewCollection: false,
+    };
 
-      setSnoozed((old) => {
-        const next = { ...old };
-        delete next[editingId];
-        return next;
-      });
+    // The user has checked the form and pressed Save, so now the server saves it.
+    let saved = next;
+    let offline = false;
 
-      setToast("New collection recorded. Calendar updated.");
-    } else {
-      setMedications((old) => [
-        ...old,
-        {
-          id: crypto.randomUUID(),
-          name,
-          quantity,
-          dailyQuantity,
-          collectionDate: form.collectionDate,
-          collections: [collection],
-          needsNewCollection: false,
-          ...schedule,
-        },
-      ]);
-
-      setToast("Medication saved. Calendar updated.");
+    setSaving(true);
+    try {
+      saved = fromServer(await saveToServer(next));
+    } catch (error) {
+      if (error.status) {
+        // The server refused it (for example an invalid date): nothing was saved.
+        setFormError(error.message);
+        setSaving(false);
+        return;
+      }
+      offline = true; // no connection: keep it on this device for now
     }
+    setSaving(false);
+
+    setMedications((old) =>
+      current
+        ? old.map((item) => (item.id === current.id ? saved : item))
+        : [...old, saved]
+    );
+
+    if (current) {
+      setSnoozed((old) => {
+        const copy = { ...old };
+        delete copy[current.id];
+        return copy;
+      });
+    }
+
+    setToast(
+      offline
+        ? "Saved on this device only. Could not reach the medAssist AI server."
+        : current
+          ? "New collection recorded. Calendar updated."
+          : "Medication saved. Calendar updated."
+    );
 
     setShowForm(false);
     setEditingId(null);
   }
 
-  function archiveMedication(medication) {
+  // Move a medication to or from Medication History on the server.
+  // Returns false if the server refused, so the screen isn't changed.
+  async function setArchivedOnServer(medication, archived) {
+    if (!medication.backendId) return true;
+
+    try {
+      await api(`/medications/${medication.backendId}/archive`, {
+        method: "POST",
+        body: { archived, details: detailsOf(medication) },
+      });
+      return true;
+    } catch (error) {
+      if (error.status) {
+        setToast(error.message);
+        return false;
+      }
+      return true; // offline: change it on this device for now
+    }
+  }
+
+  // Fill the form from the assistant's suggestion. Nothing is saved until the user presses Save.
+  function openFormFromAI(result) {
+    const p = result.parameters;
+
+    // Match by server id, or by name for medications the server doesn't know yet.
+    const medication = medications.find((item) =>
+      result.action === "update_medication_supply"
+        ? item.backendId === p.medication_id
+        : item.name.toLowerCase() === p.medication_name.toLowerCase()
+    );
+
+    if (result.action === "update_medication_supply" || medication) {
+      if (!medication) return false;
+
+      openCollectionForm(medication);
+      setForm((old) => ({
+        ...old,
+        quantity: String(p.quantity_collected),
+        collectionDate: p.collection_date,
+      }));
+      return true;
+    }
+
+    setEditingId(null);
+    setForm({
+      ...blankForm(),
+      name: p.medication_name,
+      quantity: String(p.quantity_collected),
+      collectionDate: p.collection_date,
+      dailyQuantity: String(p.daily_quantity),
+      doses: [{ time: "09:00", quantity: String(p.daily_quantity) }],
+    });
+    setFormError("");
+    setShowForm(true);
+    scrollToForm();
+    return true;
+  }
+
+  async function archiveMedication(medication) {
     const confirmed = window.confirm(
       `Move "${medication.name}" to Medication History?\n\n` +
         "It will disappear from active medications and stop showing refill reminders. You can restore it later."
@@ -881,13 +1094,15 @@ function App() {
 
     if (!confirmed) return;
 
-    setArchive((old) => [
-      {
-        ...medication,
-        archivedAt: localDate(),
-      },
-      ...old,
-    ]);
+    const archived = {
+      ...medication,
+      archived: true,
+      archivedAt: localDate(),
+    };
+
+    if (!(await setArchivedOnServer(archived, true))) return;
+
+    setArchive((old) => [archived, ...old]);
 
     setMedications((old) =>
       old.filter((item) => item.id !== medication.id)
@@ -902,7 +1117,7 @@ function App() {
     setToast("Medication moved to History.");
   }
 
-  function restoreMedication(medication) {
+  async function restoreMedication(medication) {
     const confirmed = window.confirm(
       `Restore "${medication.name}" to active medications?\n\n` +
         "You'll need to record a new collection before supply reminders restart."
@@ -910,20 +1125,22 @@ function App() {
 
     if (!confirmed) return;
 
+    const restored = {
+      ...medication,
+      quantity: 0,
+      collectionDate: localDate(),
+      needsNewCollection: true,
+      archived: false,
+      archivedAt: undefined,
+    };
+
+    if (!(await setArchivedOnServer(restored, false))) return;
+
     setArchive((old) =>
       old.filter((item) => item.id !== medication.id)
     );
 
-    setMedications((old) => [
-      ...old,
-      {
-        ...medication,
-        quantity: 0,
-        collectionDate: localDate(),
-        needsNewCollection: true,
-        archivedAt: undefined,
-      },
-    ]);
+    setMedications((old) => [...old, restored]);
 
     setToast("Medication restored. Record a new collection.");
 
@@ -943,16 +1160,12 @@ function App() {
     setToast("Reminder hidden until tomorrow.");
   }
 
-  function sendMessage(event) {
-    event.preventDefault();
-
-    const text = chatInput.trim();
-    if (!text) return;
-
+  // Offline help, used only when the medAssist AI server can't be reached.
+  function helpReply(text) {
     const input = text.toLowerCase();
 
     let reply =
-      "I can help you find things on CareNest. Use the menu at the top to explore your medications, calendar, history and emergency details.";
+      "I can help you find things on medAssist AI. Use the menu at the top to explore your medications, calendar, history and emergency details.";
 
     if (/archive|history|past|old medication/.test(input)) {
       reply =
@@ -968,7 +1181,7 @@ function App() {
         "Select Add medication, enter the collection details and prescribed schedule, then save. For an existing medication, select I've collected more.";
     } else if (/remind|refill|run out|supply/.test(input)) {
       reply =
-        "CareNest estimates supply dates and shows in-app refill reminders when 14 days or fewer remain. Check arrangements with your pharmacy.";
+        "medAssist AI estimates supply dates and shows in-app refill reminders when 14 days or fewer remain. Check arrangements with your pharmacy.";
     } else if (/emergency|allerg|contact/.test(input)) {
       reply =
         "Open Emergency details to enter contacts and self-reported information. In a UK emergency, call 999.";
@@ -977,13 +1190,48 @@ function App() {
         "Use Display at the top to choose Warm, Dark or High Contrast. Select Larger text if you'd like bigger writing.";
     }
 
-    setMessages((old) => [
-      ...old,
-      { role: "user", text },
-      { role: "assistant", text: reply },
-    ]);
+    return reply;
+  }
 
+  async function sendMessage(event) {
+    event.preventDefault();
+
+    const text = chatInput.trim();
+    if (!text || chatLoading) return;
+
+    // The last few turns, so the AI understands follow-ups like "it's ExampleMed".
+    const conversation_context = messages.slice(-6).map((message) => ({
+      role: message.role,
+      content: message.text,
+    }));
+
+    setMessages((old) => [...old, { role: "user", text }]);
     setChatInput("");
+    setChatLoading(true);
+
+    let reply;
+
+    try {
+      // NVIDIA Nemotron (via Nebius Token Factory) reads the message on the backend.
+      const result = await api("/chat", {
+        method: "POST",
+        body: { message: text, conversation_context },
+      });
+
+      reply = result.message;
+
+      if (result.requires_confirmation && openFormFromAI(result)) {
+        reply += " I've filled in the form below. Check it, then press Save.";
+      }
+    } catch (error) {
+      reply =
+        error.status === 503
+          ? "The assistant is unavailable right now. You can still add your medication with the form."
+          : `I couldn't reach the medAssist AI server. ${helpReply(text)}`;
+    }
+
+    setMessages((old) => [...old, { role: "assistant", text: reply }]);
+    setChatLoading(false);
   }
 
   function telephone(value) {
@@ -1004,7 +1252,7 @@ function App() {
             <span className="logo-symbol">
               <Icon name="heart" size={21} />
             </span>
-            CareNest
+            medAssist AI
             <span className="logo-period">.</span>
           </a>
 
@@ -1043,6 +1291,12 @@ function App() {
       </header>
 
       <main id="home">
+        {serverStatus === "offline" && (
+          <p className="server-banner" role="status">
+            Can't reach the medAssist AI server, so you're seeing what's saved on
+            this device. Changes will only be kept here for now.
+          </p>
+        )}
         {/* HERO */}
 
         <section className="hero wrap">
@@ -1530,7 +1784,7 @@ function App() {
 
               <p className="help-note">
                 Estimated supply assumes each scheduled dose is
-                taken. Times appear in the calendar only; CareNest
+                taken. Times appear in the calendar only; medAssist AI
                 does not send alarms or notifications. Always follow
                 your prescription or pharmacist.
               </p>
@@ -1545,6 +1799,7 @@ function App() {
                 <button
                   type="submit"
                   className="button button-primary"
+                  disabled={saving}
                 >
                   <Icon name="check" size={19} />
 
@@ -2213,15 +2468,16 @@ function App() {
           <div className="section-top">
             <div>
               <p className="overline">A HELPING HAND</p>
-              <h2>Ask CareNest</h2>
+              <h2>Ask medAssist AI</h2>
 
               <p className="section-subtitle">
-                Questions about using the website? Just ask.
+                Tell me what you collected in your own words.
+                I'll fill in the form for you to check.
               </p>
             </div>
 
             <span className="demo-tag">
-              Demo assistant
+              Powered by NVIDIA Nemotron
             </span>
           </div>
 
@@ -2242,6 +2498,15 @@ function App() {
                 <p>{message.text}</p>
               </div>
             ))}
+
+            {chatLoading && (
+              <div className="chat-line assistant">
+                <span className="chat-icon">
+                  <Icon name="heart" size={18} />
+                </span>
+                <p>Thinking…</p>
+              </div>
+            )}
           </div>
 
           <form className="chat-form" onSubmit={sendMessage}>
@@ -2249,7 +2514,7 @@ function App() {
               className="sr-only"
               htmlFor="chat-input"
             >
-              Ask CareNest a question
+              Ask medAssist AI a question
             </label>
 
             <input
@@ -2258,12 +2523,14 @@ function App() {
               onChange={(event) =>
                 setChatInput(event.target.value)
               }
-              placeholder="e.g. How do I add a weekly medication?"
+              placeholder="e.g. I collected 60 tablets of ExampleMed today, one a day"
+              maxLength={1000}
             />
 
             <button
               className="button button-primary"
               type="submit"
+              disabled={chatLoading}
             >
               Send
               <Icon name="arrow" size={18} />
@@ -2271,7 +2538,9 @@ function App() {
           </form>
 
           <p className="privacy-note">
-            Demo responses only. The AI model is not connected yet.
+            The assistant only fills in the form. Nothing is saved
+            until you press Save. Use fictional medication names for
+            the demo.
           </p>
         </section>
 
@@ -2281,9 +2550,9 @@ function App() {
           <Icon name="info" size={22} />
 
           <p>
-            <strong>A note about CareNest:</strong>{" "}
+            <strong>A note about medAssist AI:</strong>{" "}
             Supply dates assume every scheduled dose is taken and
-            are only estimates. CareNest does not know whether
+            are only estimates. medAssist AI does not know whether
             tablets have actually been taken and does not provide
             medical advice. Calendar times are not notifications.
           </p>
@@ -2295,7 +2564,7 @@ function App() {
       <footer className="footer">
         <div className="wrap footer-inner">
           <strong>
-            CareNest<span>.</span>
+            medAssist AI<span>.</span>
           </strong>
 
           <p>

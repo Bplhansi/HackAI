@@ -3,12 +3,21 @@
 The AI's output is NOT trusted either. The user confirms in the form, and the
 confirm routes re-validate with these models before anything is saved.
 """
+import json
 from datetime import date, timedelta
 
 from pydantic import BaseModel, Field, field_validator
 
 MAX_QUANTITY = 10000  # tablets in one collection
 MAX_DAILY = 50  # tablets per day
+MAX_DETAILS_BYTES = 20000  # the frontend's extra info (schedule, dose times, history)
+
+
+def _check_details(value: dict | None) -> dict | None:
+    # Stored as-is and only shown back to the same user, but keep it small.
+    if value is not None and len(json.dumps(value)) > MAX_DETAILS_BYTES:
+        raise ValueError("Medication details are too large")
+    return value
 
 
 def _check_collection_date(value: date) -> date:
@@ -32,6 +41,13 @@ class ConfirmAdd(BaseModel):
     quantity_collected: int = Field(gt=0, le=MAX_QUANTITY)
     collection_date: date
     daily_quantity: float = Field(gt=0, le=MAX_DAILY)
+    # Optional extra info from the frontend: schedule, dose times, collection history
+    details: dict | None = None
+
+    @field_validator("details")
+    @classmethod
+    def check_details(cls, v: dict | None) -> dict | None:
+        return _check_details(v)
 
     @field_validator("medication_name")
     @classmethod
@@ -53,6 +69,13 @@ class ConfirmUpdate(BaseModel):
     collection_date: date
     # Optional: leave out to keep the saved daily quantity
     daily_quantity: float | None = Field(default=None, gt=0, le=MAX_DAILY)
+    # Optional: leave out to keep the saved details
+    details: dict | None = None
+
+    @field_validator("details")
+    @classmethod
+    def check_details(cls, v: dict | None) -> dict | None:
+        return _check_details(v)
 
     @field_validator("collection_date")
     @classmethod
@@ -62,3 +85,13 @@ class ConfirmUpdate(BaseModel):
 
 class SnoozeRequest(BaseModel):
     days: int = Field(default=1, ge=1, le=7)
+
+
+class ArchiveRequest(BaseModel):
+    archived: bool
+    details: dict | None = None
+
+    @field_validator("details")
+    @classmethod
+    def check_details(cls, v: dict | None) -> dict | None:
+        return _check_details(v)

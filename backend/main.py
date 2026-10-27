@@ -1,4 +1,4 @@
-"""CareNest AI backend (FastAPI).
+"""medAssist AI backend (FastAPI).
 
 Flow:  React -> /chat (AI proposes, nothing saved)
        React shows a confirmation form
@@ -17,7 +17,7 @@ load_dotenv()
 
 import supply  # noqa: E402
 from db import get_database  # noqa: E402
-from models import ChatRequest, ConfirmAdd, ConfirmUpdate, SnoozeRequest  # noqa: E402
+from models import ArchiveRequest, ChatRequest, ConfirmAdd, ConfirmUpdate, SnoozeRequest  # noqa: E402
 
 # ---------- settings (all from environment variables) ----------
 REPEAT_EVERY_DAYS = int(os.getenv("REPEAT_EVERY_DAYS", "3"))
@@ -44,7 +44,7 @@ ALLOWED_ACTIONS = {"add_medication", "update_medication_supply",
 
 db = get_database()
 
-app = FastAPI(title="CareNest AI backend")
+app = FastAPI(title="medAssist AI backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -71,6 +71,8 @@ def _med_view(med: dict, today: date) -> dict:
     """A medication row plus days_left, for the frontend cards."""
     end = date.fromisoformat(med["estimated_end_date"])
     out = {k: v for k, v in med.items() if k != "user_id"}
+    out["details"] = med.get("details") or {}
+    out["archived"] = bool(med.get("archived"))
     out["days_left"] = supply.days_left(end, today)
     return out
 
@@ -106,7 +108,8 @@ def health():
 @app.post("/chat")
 async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
     """Ask the AI to interpret a message. Saves NOTHING."""
-    meds = db.list_medications(user_id)  # only this user's medications
+    # Only this user's medications, and not the ones moved to Medication History.
+    meds = [m for m in db.list_medications(user_id) if not m.get("archived")]
     # Give the AI only what it needs (no user_id).
     ai_meds = [{k: m[k] for k in ("id", "name", "daily_quantity", "quantity_collected",
                                   "collection_date", "estimated_end_date")} for m in meds]
@@ -134,7 +137,7 @@ def list_medications(user_id: str = Depends(get_current_user)):
 @app.post("/medications/confirm-add", status_code=201)
 def confirm_add(body: ConfirmAdd, user_id: str = Depends(get_current_user)):
     today = date.today()
-    existing = {m["name"].lower() for m in db.list_medications(user_id)}
+    existing = {m["name"].lower() for m in db.list_medications(user_id) if not m.get("archived")}
     if body.medication_name.lower() in existing:
         raise HTTPException(409, f"{body.medication_name} is already being tracked. "
                                  "Update it with the new collection instead.")
@@ -147,6 +150,8 @@ def confirm_add(body: ConfirmAdd, user_id: str = Depends(get_current_user)):
             "collection_date": body.collection_date.isoformat(),
             "daily_quantity": body.daily_quantity,
             "estimated_end_date": end.isoformat(),
+            "details": body.details or {},
+            "archived": False,
         })
         reminders = _create_reminders(user_id, med["id"], end, today)
     except Exception as err:
@@ -165,13 +170,17 @@ def confirm_update(body: ConfirmUpdate, user_id: str = Depends(get_current_user)
         raise HTTPException(404, "Medication not found")
     daily = body.daily_quantity or float(med["daily_quantity"])
     end = supply.estimate_end_date(body.collection_date, body.quantity_collected, daily)
+    changes = {
+        "quantity_collected": body.quantity_collected,
+        "collection_date": body.collection_date.isoformat(),
+        "daily_quantity": daily,
+        "estimated_end_date": end.isoformat(),
+        "archived": False,  # a new collection brings a restored medication back
+    }
+    if body.details is not None:
+        changes["details"] = body.details
     try:
-        updated = db.update_medication(user_id, med["id"], {
-            "quantity_collected": body.quantity_collected,
-            "collection_date": body.collection_date.isoformat(),
-            "daily_quantity": daily,
-            "estimated_end_date": end.isoformat(),
-        })
+        updated = db.update_medication(user_id, med["id"], changes)
         if not updated:
             raise HTTPException(404, "Medication not found")
         db.cancel_open_reminders(user_id, med["id"])  # old reminders are now wrong
@@ -183,6 +192,22 @@ def confirm_update(body: ConfirmUpdate, user_id: str = Depends(get_current_user)
         raise HTTPException(500, "Could not save. Nothing has been confirmed.")
     return {"success": True, "medication": _med_view(updated, today), "reminders": reminders,
             "message": f"Updated. New estimated supply end date: {end.isoformat()}."}
+
+
+@app.post("/medications/{med_id}/archive")
+def archive_medication(med_id: str, body: ArchiveRequest,
+                       user_id: str = Depends(get_current_user)):
+    """Move a medication to (or back from) Medication History. Nothing is deleted."""
+    changes = {"archived": body.archived}
+    if body.details is not None:
+        changes["details"] = body.details
+    updated = db.update_medication(user_id, med_id, changes)  # checks ownership
+    if not updated:
+        raise HTTPException(404, "Medication not found")
+    # Archived medications get no reminders. Restored ones get new reminders
+    # when the user records their next collection (confirm-update).
+    db.cancel_open_reminders(user_id, med_id)
+    return {"success": True, "medication": _med_view(updated, date.today())}
 
 
 @app.delete("/medications/{med_id}")
@@ -197,7 +222,7 @@ def get_reminders(user_id: str = Depends(get_current_user)):
     """Reminders that are due today. Also creates the next 'repeat' reminder if needed
     (so we don't need a separate scheduler)."""
     today = date.today()
-    meds = {m["id"]: m for m in db.list_medications(user_id)}
+    meds = {m["id"]: m for m in db.list_medications(user_id) if not m.get("archived")}
     reminders = db.list_reminders(user_id)
 
     for med in meds.values():
