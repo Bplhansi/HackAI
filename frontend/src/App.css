@@ -1,5 +1,5 @@
 /* ========================================
-   CARENEST
+   MEDASSIST AI
    PROFESSIONAL WARM EDITORIAL DESIGN
 ======================================== */
 
@@ -2040,4 +2040,13 @@ section[id],
   .schedule-dose-row .button {
     width: 100%;
   }
+}
+/* Shown when the medAssist AI server cannot be reached */
+.server-banner {
+  margin: 0;
+  padding: 12px 20px;
+  background: var(--warning-pale);
+  color: var(--warning);
+  text-align: center;
+  font-weight: 600;
 }

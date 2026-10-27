@@ -1,0 +1,5 @@
+# Netlify build settings. In Netlify set the base directory to "frontend"
+# and add VITE_API_URL (your Render backend URL) under Environment variables.
+[build]
+  command = "npm run build"
+  publish = "dist"

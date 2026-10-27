@@ -254,3 +254,65 @@ def test_login_token_required_when_demo_mode_off(client, monkeypatch):
     assert client.get("/medications").status_code == 401
     assert client.get("/medications",
                       headers={"Authorization": "Bearer junk"}).status_code == 401
+
+
+# ---------- details and archive (frontend loads everything from the backend) ----------
+SCHEDULE = {"frequency": "weekly", "weekDay": 1, "doses": [{"time": "09:00", "quantity": 1}]}
+
+
+def test_details_are_saved_and_returned(client):
+    client.post("/medications/confirm-add", json=add_body(details=SCHEDULE))
+    med = client.get("/medications").json()["medications"][0]
+    assert med["details"] == SCHEDULE
+    assert med["archived"] is False
+
+
+def test_update_keeps_details_unless_new_ones_are_sent(client):
+    med_id = client.post("/medications/confirm-add",
+                         json=add_body(details=SCHEDULE)).json()["medication"]["id"]
+    body = {"medication_id": med_id, "quantity_collected": 30,
+            "collection_date": TODAY.isoformat()}
+    assert client.post("/medications/confirm-update", json=body).json()["medication"]["details"] == SCHEDULE
+    body["details"] = {"frequency": "daily"}
+    assert client.post("/medications/confirm-update", json=body).json()["medication"]["details"] == {"frequency": "daily"}
+
+
+def test_huge_details_are_rejected(client):
+    r = client.post("/medications/confirm-add", json=add_body(details={"x": "a" * 30000}))
+    assert r.status_code == 422
+
+
+def test_archive_hides_from_ai_and_reminders_but_keeps_the_record(client, monkeypatch, fresh_db):
+    med = _add_ending_in(client, 5)["medication"]
+    r = client.post(f"/medications/{med['id']}/archive", json={"archived": True})
+    assert r.status_code == 200 and r.json()["medication"]["archived"] is True
+    assert client.get("/reminders").json()["reminders"] == []
+    assert len(client.get("/medications").json()["medications"]) == 1  # still there
+
+    seen = {}
+
+    async def fake(**kwargs):
+        seen["meds"] = kwargs["medications"]
+        return {"action": "general_response", "parameters": {}, "missing_fields": [],
+                "requires_confirmation": False, "message": "Hi"}
+    monkeypatch.setattr(main, "interpret_medication_message", fake)
+    client.post("/chat", json={"message": "hello"})
+    assert seen["meds"] == []
+
+
+def test_archived_name_can_be_added_again(client):
+    med_id = client.post("/medications/confirm-add", json=add_body()).json()["medication"]["id"]
+    client.post(f"/medications/{med_id}/archive", json={"archived": True})
+    assert client.post("/medications/confirm-add", json=add_body()).status_code == 201
+
+
+def test_new_collection_restores_an_archived_medication(client):
+    med_id = client.post("/medications/confirm-add", json=add_body()).json()["medication"]["id"]
+    client.post(f"/medications/{med_id}/archive", json={"archived": True})
+    r = client.post("/medications/confirm-update", json={
+        "medication_id": med_id, "quantity_collected": 30, "collection_date": TODAY.isoformat()})
+    assert r.json()["medication"]["archived"] is False
+
+
+def test_cannot_archive_unknown_medication(client):
+    assert client.post("/medications/nope/archive", json={"archived": True}).status_code == 404

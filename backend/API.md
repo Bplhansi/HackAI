@@ -1,4 +1,4 @@
-# CareNest AI backend: API and integration guide
+# medAssist AI backend: API and integration guide
 
 Base URL: `http://localhost:8000` locally, your Render/Railway URL when deployed.
 All routes return JSON. Errors look like `{"detail": "message"}`.
@@ -19,15 +19,20 @@ send `Authorization: Bearer <supabase access token>` on every request.
 |---|---|---|
 | `GET /health` | | `{status, ai, database}` (`ai` must say `nemotron` in the real demo) |
 | `POST /chat` | `{"message": "...", "conversation_context": [{"role":"user","content":"..."}]}` | the AI result (below) |
-| `GET /medications` | | `{"medications": [{id, name, quantity_collected, collection_date, daily_quantity, estimated_end_date, days_left}]}` |
-| `POST /medications/confirm-add` | `{medication_name, quantity_collected, collection_date, daily_quantity}` | 201 `{success, medication, reminders, message}` |
-| `POST /medications/confirm-update` | `{medication_id, quantity_collected, collection_date, daily_quantity?}` | `{success, medication, reminders, message}` |
+| `GET /medications` | | `{"medications": [{id, name, quantity_collected, collection_date, daily_quantity, estimated_end_date, days_left, details, archived}]}` (includes archived ones) |
+| `POST /medications/confirm-add` | `{medication_name, quantity_collected, collection_date, daily_quantity, details?}` | 201 `{success, medication, reminders, message}` |
+| `POST /medications/confirm-update` | `{medication_id, quantity_collected, collection_date, daily_quantity?, details?}` | `{success, medication, reminders, message}` |
+| `POST /medications/{id}/archive` | `{"archived": true or false, "details"?: {...}}` | `{success, medication}`: moves it to or from Medication History |
 | `DELETE /medications/{id}` | | `{success: true}` |
 | `GET /reminders` | | `{"reminders": [{id, medication_id, medication_name, kind, status, remind_on, snoozed_until, estimated_end_date, days_left}]}`: only reminders due today |
 | `POST /reminders/{id}/acknowledge` | | `{success, reminder}` |
 | `POST /reminders/{id}/snooze` | optional `{"days": 1-7}` (default 1) | `{success, reminder}` |
 
-`collection_date` is `"YYYY-MM-DD"`. Call `GET /reminders` when the page loads and
+`collection_date` is `"YYYY-MM-DD"`. `details` is any small JSON object the frontend
+wants kept with the medication (schedule, dose times, collection history), up to 20 KB.
+The backend stores it and gives it back, but never uses it for maths: `daily_quantity`
+must already be the average per day. Archived medications get no reminders and are
+not shown to the AI; recording a new collection (`confirm-update`) restores them. Call `GET /reminders` when the page loads and
 every few minutes. It also creates repeat reminders, so no separate scheduler is needed.
 
 Status codes to handle: `422` invalid input (show the message), `404` not found,
