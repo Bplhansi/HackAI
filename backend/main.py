@@ -346,7 +346,7 @@ def confirm_add(
         )
 
     except Exception as err:
-        print(f"Database error: {type(err).__name__}")
+        print(f"Database error: {err}")
 
         raise HTTPException(
             status_code=500,
